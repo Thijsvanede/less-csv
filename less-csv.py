@@ -36,6 +36,8 @@ class Reader(object):
 
         # Open file
         with open(file) as file:
+            # Compute file size
+            self.fsize = self.file_size(file)
             # Collect header
             self.columns = self.header(file)
 
@@ -118,8 +120,15 @@ class Reader(object):
 
         # Erase previous data
         self.clear_terminal()
+
         # Display partial file contents
         self.data_partial(file, rows, columns)
+        # Display where in file we are
+        print("Showing: rows {:5.1f}%-{:5.1f}%, columns {:>{width}}-{:>{width}}/{:>{width}}".format(
+            100*position/self.fsize, 100*self.position_max/self.fsize,
+            self.offset_column, self.offset_column+self.disp_column-1,
+            self.max_column, width=len(str(self.max_column))),
+            end='\r')
 
         # Reset offset row
         self.offset_row = 0
@@ -135,37 +144,17 @@ class Reader(object):
             max_column : int
                 Maximum column offset.
             """
-        # Store data
-        data = list()
-
-        # Read appropriate number of lines
-        for i, line in enumerate(file):
-            # Check if we should break
-            if len(data) >= rows - 2: break
-            # Append line
-            data.append(line.split(self.columnsep))
-
-        # Get data in matrix format
-        data = np.asarray(data, dtype=str)
-
-        # Set maximum column offset
-        self.max_column = data.shape[1] - 1
-
-        # Compute column widths
-        width = np.zeros(data.shape[1], dtype=int)
-        for column in range(data.shape[1]):
-            width[column] = max(max([len(x) for x in data[:,column]]),
-                                len(self.columns[column]))
-
-        # Compute number of rows to show
-        nrows = 1
-        while self.offset_column + nrows <= data.shape[1] and\
-            width[self.offset_column:self.offset_column+nrows].sum() + 3 * nrows < columns:
-            nrows += 1
-        nrows -= 1
+        # Read rows as data
+        data = self.data_rows(file, rows)
+        # Get column information
+        width, n_columns = self.data_columns(file, data)
+        # Set display columns
+        self.disp_column = n_columns
+        # Set max column
+        self.max_column = width.shape[0] - 1
 
         # Display header
-        print(self.header_partial(self.offset_column, self.offset_column + nrows, width))
+        print(self.header_partial(self.offset_column, self.offset_column + n_columns, width))
 
         # Display data
         # Loop over each row
@@ -173,11 +162,92 @@ class Reader(object):
             # Initialise line
             line = list()
             # Loop over each cell in columns to display
-            for i, cell in enumerate(row[self.offset_column:self.offset_column+nrows]):
+            for i, cell in enumerate(row[self.offset_column:self.offset_column+n_columns]):
                 # Add cell with corresponding width
-                line.append("{:>{width}}".format(cell.strip(), width=width[self.offset_column+i]))
+                line.append("{:>{width}}".format(cell.strip()[:columns-3] + '...' if len(cell.strip()) >= columns-3 else cell.strip(), width=min(width[self.offset_column+i], columns)))
             # Print line separated by |
             print(' | '.join(line))
+
+    def data_rows(self, file, rows):
+        """Get specified number of rows from file.
+
+            Parameters
+            ----------
+            file : file
+                File from which to read specified number of rows.
+
+            rows : int
+                Number of rows to read, 2 will be deducted for header and footer.
+
+            Returns
+            -------
+            result : np.array of shape=(rows-2,)
+                Rows read from file.
+            """
+        # Store data
+        data = list()
+
+        # Read appropriate number of lines
+        while len(data) < rows - 2:
+            # Read line
+            line = file.readline()
+            # Append line
+            data.append([x.strip() for x in line.split(self.columnsep)])
+
+        # Set max position
+        self.position_max = file.tell()
+
+        # Get data in matrix format
+        try:
+            data = np.asarray(data, dtype=str)
+        except:
+            # Get number of rows and columns
+            n_rows    = len(data)
+            n_columns = max(len(row) for row in data)
+            # Make new data array
+            d = np.full((n_rows, n_columns), "", dtype=object)
+            # Fill data array
+            for i, row in enumerate(data):
+                d[i] = row + [""]*(len(row)-n_columns)
+            # Set data
+            data = d
+
+        # Return rows
+        return data
+
+    def data_columns(self, file, rows):
+        """Compute column statistics.
+
+            Parameters
+            ----------
+            file : file
+                File from which to read specified number of rows.
+
+            rows : np.array of shape=(rows-2,)
+                Rows read from file.
+
+            Returns
+            -------
+            width : np.array of shape=(n_columns,)
+                Width of each column
+
+            n_columns : int
+                Number of columns to display
+            """
+        # Get columns in terminal
+        columns, _ = self.terminal_size()
+
+        # Compute column widths
+        width = np.maximum(
+            np.asarray([len(c) for c in self.columns]),      # Header widths
+            np.vectorize(lambda x: len(x))(rows).max(axis=0) # Data widths
+        )
+
+        # Compute number of columns to show
+        n_columns = np.sum(np.cumsum(width[self.offset_column:] + 3) < columns)
+
+        # Return column statistics
+        return width, n_columns or 1
 
     def header(self, file):
         """Read header of file.
@@ -315,9 +385,9 @@ class Reader(object):
         file.seek(position - lookback + 2, 0)
 
         # Edge case for first line
-        if file.tell() <= 2:
-            file.seek(0, 0)
-            file = self.line_down(file, 1)
+        # if file.tell() <= 2:
+        #     file.seek(0, 0)
+        #     file = self.line_down(file, 1)
 
         # Return file
         return file
@@ -349,6 +419,32 @@ class Reader(object):
     ########################################################################
     #                           OS I/O methods                             #
     ########################################################################
+
+    def file_size(self, file):
+        """Compute file size of given file.
+
+            Parameters
+            ----------
+            file : file
+                File for which to compute the size.
+
+            Returns
+            -------
+            result : int
+                Number of bytes in file.
+            """
+        # Get current position
+        position = file.tell()
+
+        # Compute size
+        file.seek(0, 2)
+        size = file.tell()
+
+        # Return to original position
+        file.seek(position, 0)
+
+        # Return file size
+        return size
 
     def terminal_size(self):
         """Read terminal size.
