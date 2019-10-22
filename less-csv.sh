@@ -1,3 +1,3 @@
 #!/bin/bash
 
-python3 reader.py $1
+python3 less-csv.py $1
